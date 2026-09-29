@@ -1,4 +1,4 @@
-import os, time, json, secrets, base64, hashlib, hmac, struct, io, sqlite3
+import os, time, json, secrets, base64, hashlib, hmac, struct, io, sqlite3, ipaddress
 from datetime import timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, session, g, render_template, send_file
@@ -15,6 +15,13 @@ def totp_counter(secret_value, code, now=None):
         expected=str((struct.unpack('>I',digest[offset:offset+4])[0]&0x7fffffff)%1000000).zfill(6)
         if hmac.compare_digest(expected,str(code)): return counter
     return -1
+
+def client_key(ip):
+    """Login throttling key. An IPv6 /64 is normally one client, so rotating addresses inside it does not reset the count."""
+    try:
+        if ipaddress.ip_address(ip).version==6: return 'ip:'+str(ipaddress.ip_network(ip+'/64',strict=False))
+    except ValueError: pass
+    return 'ip:'+str(ip)
 
 def create_app():
     init(); app=Flask(__name__)
@@ -73,7 +80,8 @@ def create_app():
     @app.post('/api/login')
     def login():
         d=request.get_json(); ip=request.remote_addr; username=str(d.get('username',''))[:64]; now=time.time()
-        keys=['ip:'+ip,'user:'+username]
+        # Per client only: a per-username counter would let anyone lock the admin out.
+        keys=[client_key(ip)]
         with db() as c:
             for key in keys:
                 row=c.execute('SELECT * FROM attempts WHERE ip=?',(key,)).fetchone()
@@ -124,14 +132,23 @@ def create_app():
         return jsonify(result)
     def enqueue(c,action,payload,rid=None):
         return c.execute('INSERT INTO jobs(action,payload,resource_id) VALUES(?,?,?)',(action,encrypt(payload),rid)).lastrowid
+    def claimed(c,kind,name,rid=None):
+        # A queued rename is not in resources yet: its new name exists only inside the encrypted job payload.
+        return any(job['resource_id']!=rid and decrypt(job['payload']).get('name')==name for job in
+            c.execute("SELECT resource_id,payload FROM jobs WHERE action=? AND status IN ('queued','running')",(kind+'.update',)))
+    def taken(c,kind,name,rid):
+        return c.execute('SELECT 1 FROM resources WHERE kind=? AND name=? AND id!=?',(kind,name,rid)).fetchone() or claimed(c,kind,name,rid)
     @app.post('/api/resources/<kind>')
     @auth(('admin','operator'))
     def create(kind):
         d=validate(kind,request.get_json())
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             if kind!='sites':
-                site=c.execute("SELECT 1 FROM resources WHERE kind='sites' AND name=? AND status='active'",(d['domain'],)).fetchone()
+                site=c.execute("SELECT data FROM resources WHERE kind='sites' AND name=? AND status='active'",(d['domain'],)).fetchone()
                 if not site: raise ValueError('Pilih situs aktif terlebih dahulu.')
+                if kind=='cron' and json.loads(site['data']).get('php')=='static': raise ValueError('Cron hanya untuk situs PHP.')
+            if claimed(c,kind,d['name']): raise ValueError('Nama objek sedang dipakai oleh perubahan yang belum selesai.')
             rid=c.execute('INSERT INTO resources(kind,name,data) VALUES(?,?,?)',(kind,d['name'],json.dumps(public(d)))).lastrowid
             jid=enqueue(c,kind+'.create',d,rid)
         audit('resource.create',kind+':'+d['name']); return jsonify(id=rid,job=jid),202
@@ -139,13 +156,15 @@ def create_app():
     @auth(('admin','operator'))
     def update_resource(rid):
         with db() as c:
+            c.execute('BEGIN IMMEDIATE')
             row=c.execute('SELECT * FROM resources WHERE id=?',(rid,)).fetchone()
             if not row or row['kind']=='backups': raise ValueError('Objek tidak dapat diubah.')
             if row['status'] in ('pending','deleting'): raise ValueError('Pekerjaan sebelumnya belum selesai.')
             old=json.loads(row['data']); raw=dict(old); raw.update(request.get_json())
             d=validate(row['kind'],raw)
             if d['domain']!=old['domain']: raise ValueError('Perpindahan domain tidak didukung.')
-            if c.execute('SELECT 1 FROM resources WHERE kind=? AND name=? AND id!=?',(row['kind'],d['name'],rid)).fetchone(): raise ValueError('Nama objek telah digunakan.')
+            if taken(c,row['kind'],d['name'],rid): raise ValueError('Nama objek telah digunakan.')
+            if row['kind']=='sites' and d['php']=='static' and any(json.loads(x['data'])['domain']==d['domain'] for x in c.execute("SELECT data FROM resources WHERE kind='cron'")): raise ValueError('Hapus cron situs ini sebelum beralih ke static.')
             d['_old_name']=row['name']
             jid=enqueue(c,row['kind']+'.update',d,rid)
             c.execute("UPDATE resources SET status='pending' WHERE id=?",(rid,))
@@ -176,6 +195,9 @@ def create_app():
             row=c.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
             if not row or row['status']!='failed' or not row['payload']: raise ValueError('Pekerjaan ini tidak dapat diulang.')
             if row['resource_id'] and c.execute("SELECT 1 FROM jobs WHERE resource_id=? AND status IN ('queued','running')",(row['resource_id'],)).fetchone(): raise ValueError('Masih ada pekerjaan aktif.')
+            # Replaying an old payload would overwrite whatever a later job already applied.
+            if row['resource_id'] and c.execute('SELECT 1 FROM jobs WHERE resource_id=? AND id>?',(row['resource_id'],jid)).fetchone(): raise ValueError('Objek ini sudah memiliki pekerjaan yang lebih baru. Ulangi ditolak agar perubahan terbaru tidak tertimpa.')
+            if row['action'].endswith('.update') and taken(c,row['action'].split('.')[0],decrypt(row['payload'])['name'],row['resource_id']): raise ValueError('Nama objek telah digunakan.')
             c.execute("UPDATE jobs SET status='queued',message='',finished=NULL WHERE id=?",(jid,))
             if row['resource_id']: c.execute("UPDATE resources SET status=? WHERE id=?",('deleting' if row['action'].endswith('.delete') else 'pending',row['resource_id']))
         audit('job.retry',str(jid)); return jsonify(ok=True)

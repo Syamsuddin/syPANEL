@@ -46,15 +46,15 @@ Kunci ini hanya untuk SFTP. Akun situs tidak mendapat terminal SSH interaktif, t
 
 ## Cron
 
-Buat file PHP terlebih dahulu. Contoh path `jobs/sinkron.php`, jadwal `*/5 * * * *` untuk setiap lima menit. Jadwal mengikuti zona waktu server. Cron memakai `/usr/bin/php`, yakni versi CLI default server. Versi CLI belum dapat dipilih per jadwal. Output dibuang, sehingga aplikasi harus mencatat hasil ke file/log sendiri.
+Buat file PHP terlebih dahulu. Contoh path `jobs/sinkron.php`, jadwal `*/5 * * * *` untuk setiap lima menit. Jadwal mengikuti zona waktu server. Cron memakai PHP CLI dengan versi yang sama seperti runtime situs, misalnya `/usr/bin/php8.3` untuk situs PHP 8.3, dan ikut berganti saat runtime situs diubah. Cron tidak tersedia untuk situs static; hapus cron situs sebelum mengubah runtime menjadi static. Output dibuang, sehingga aplikasi harus mencatat hasil ke file/log sendiri.
 
 ## Backup dan pemulihan
 
 Backup mengarsip file website biasa dan folder. Symlink serta file khusus tidak diikutkan. Arsip tersimpan lokal pada VPS. Backup tidak mencakup database, email, sertifikat, atau seluruh akun panel.
 
-Pemulihan menimpa file bernama sama. File tambahan setelah backup tetap ada. Folder dibuat bila belum ada. Pemulihan tidak transaksional, sehingga kegagalan di tengah proses dapat menghasilkan sebagian file sudah dipulihkan. Buat cadangan sebelum pemulihan.
+Pemulihan menimpa file bernama sama. File tambahan setelah backup tetap ada. Folder dibuat bila belum ada. Seluruh isi arsip diperiksa sebelum file pertama ditulis, sehingga arsip yang tidak aman ditolak tanpa mengubah situs. Pemulihan tetap tidak transaksional: kegagalan saat penulisan, misalnya disk penuh, dapat menghasilkan sebagian file sudah dipulihkan. Buat cadangan sebelum pemulihan.
 
-Batas restore panel: ukuran terurai total 2 GiB, maksimal 16 MiB per file. Arsip unduhan panel maksimal 64 MiB. Ambil arsip lebih besar melalui SSH administrator. Untuk database, gunakan Ekspor SQL pada menu Database. Impor/pemulihan SQL dilakukan administrator secara terpisah.
+Batas restore panel: ukuran terurai total 2 GiB. Backup dan restore melalui panel harus selesai dalam sekitar 4 menit. Arsip unduhan panel maksimal 64 MiB. Ambil arsip lebih besar melalui SSH administrator. Untuk database, gunakan Ekspor SQL pada menu Database. Impor/pemulihan SQL dilakukan administrator secara terpisah.
 
 ## Pengguna
 

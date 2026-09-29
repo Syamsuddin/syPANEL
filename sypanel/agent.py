@@ -1,14 +1,29 @@
 """Privileged narrow-operation agent. Unix socket; Linux peer UID authentication."""
-import os, json, subprocess, hashlib, socket, struct, pwd, grp, time, re, base64, tarfile, io, shutil, platform
+import os, json, subprocess, hashlib, socket, struct, pwd, grp, time, re, base64, tarfile, io, shutil, platform, threading
 from pathlib import Path
-from .core import validate, domain, public, path_relative
+from .core import validate, domain, public, path_relative, KINDS
 
 SERVICES={'nginx','mariadb','bind9','named','ssh','cron','php8.1-fpm','php8.3-fpm','postfix','dovecot'}
+ENV={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'}
+HELPER=['/opt/sypanel/.venv/bin/python','/opt/sypanel/sypanel/fileops.py']
+# Actions that never change server state may run in parallel; everything else is serialized.
+READS={'metrics','logs','file','download','db_export'}
+LOCK=threading.Lock()
 
-def run(args, data=None, timeout=90):
-    p=subprocess.run(args,input=data,text=True,capture_output=True,timeout=timeout,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'})
-    if p.returncode: raise ValueError((p.stderr or p.stdout or 'Layanan mengembalikan kesalahan.')[-1800:])
+def run(args, data=None, timeout=90, text=True):
+    p=subprocess.run(args,input=data,text=text,capture_output=True,timeout=timeout,env=ENV)
+    if p.returncode:
+        error=(p.stderr or p.stdout) if text else (p.stderr or p.stdout).decode(errors='replace')
+        raise ValueError((error or 'Layanan mengembalikan kesalahan.')[-1800:])
     return p.stdout
+
+def txt(value):
+    """Quoted TXT data, split into strings of at most 255 bytes, BIND's limit per string."""
+    chunks=['']
+    for ch in value:
+        if len((chunks[-1]+ch).encode())>255: chunks.append('')
+        chunks[-1]+=ch
+    return ' '.join('"'+x.replace('\\','\\\\').replace('"','\\"')+'"' for x in chunks)
 
 def atomic(path, content, mode=0o640):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
@@ -53,10 +68,12 @@ class Engine:
         lines=f'server {{\n listen 80;\n server_name {name};\n root {root};\n index index.php index.html;\n client_max_body_size 16m;\n access_log /var/log/nginx/sypanel-{name}.access.log;\n error_log /var/log/nginx/sypanel-{name}.error.log;\n location ^~ /.well-known/acme-challenge/ {{ allow all; }}\n'
         if secure: lines+=f' location / {{ return 301 https://{name}$request_uri; }}\n}}\nserver {{\n listen 443 ssl;\n server_name {name};\n root {root};\n index index.php index.html;\n ssl_certificate /etc/letsencrypt/live/{name}/fullchain.pem;\n ssl_certificate_key /etc/letsencrypt/live/{name}/privkey.pem;\n ssl_protocols TLSv1.2 TLSv1.3;\n client_max_body_size 16m;\n access_log /var/log/nginx/sypanel-{name}.access.log;\n error_log /var/log/nginx/sypanel-{name}.error.log;\n'
         redirect=self.state.get('redirects:'+name)
+        # Regex locations outrank "location /": a redirected site gets no PHP location, so *.php is redirected too.
         if redirect: lines+=f" location / {{ return 302 {redirect['target']}; }}\n"
-        else: lines+=' location / { try_files $uri $uri/ /index.php?$query_string; }\n'
-        if php!='static': lines+=f' location ~ \\.php$ {{ try_files $uri =404; include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; fastcgi_pass unix:/run/php/{self.uid(name)}.sock; }}\n'
-        else: lines+=' location ~ \\.php$ { deny all; }\n'
+        else:
+            lines+=' location / { try_files $uri $uri/ /index.php?$query_string; }\n'
+            if php!='static': lines+=f' location ~ \\.php$ {{ try_files $uri =404; include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; fastcgi_pass unix:/run/php/{self.uid(name)}.sock; }}\n'
+            else: lines+=' location ~ \\.php$ { deny all; }\n'
         lines+=' location ~ /\\. { deny all; }\n}\n'
         return lines
     def web_apply(self,d):
@@ -76,10 +93,10 @@ class Engine:
             run(['setfacl','-d','-m','u:www-data:rx',str(web)])
             ssh=f'Match User {user}\n ChrootDirectory {root}\n ForceCommand internal-sftp -d /public_html\n AuthorizedKeysFile /etc/ssh/sypanel/%u\n PasswordAuthentication no\n AllowTcpForwarding no\n X11Forwarding no\n PermitTunnel no\nMatch all\n'
             self.apply_config('/etc/ssh/sshd_config.d/sypanel-'+user+'.conf',ssh,['sshd','-t'],['systemctl','reload','ssh'])
-        if not (web/'index.html').exists():
-            (web/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>'+d['domain']+'</title><h1>'+d['domain']+'</h1><p>Website aktif. Dikelola melalui syPanel.</p>')
-            if self.live:
-                os.chown(web/'index.html',info.pw_uid,info.pw_gid); os.chmod(web/'index.html',0o640)
+        # public_html belongs to the site user: never write there as root. lexists also counts a dangling symlink.
+        if not os.path.lexists(web/'index.html'):
+            page='<!doctype html><meta charset="utf-8"><title>'+d['domain']+'</title><h1>'+d['domain']+'</h1><p>Website aktif. Dikelola melalui syPanel.</p>'
+            self.file({'domain':d['domain'],'op':'write','path':'index.html','content':base64.b64encode(page.encode()).decode()})
         if d['php']!='static':
             pool=f'[{user}]\nuser = {user}\ngroup = {user}\nlisten = /run/php/{user}.sock\nlisten.owner = www-data\nlisten.group = www-data\npm = ondemand\npm.max_children = 5\npm.process_idle_timeout = 10s\nphp_admin_value[open_basedir] = {web}:/tmp\nphp_admin_value[upload_tmp_dir] = /tmp\nphp_admin_flag[log_errors] = on\nsecurity.limit_extensions = .php\n'
             self.apply_config('/etc/php/'+d['php']+'/fpm/pool.d/'+user+'.conf',pool,['php-fpm'+d['php'],'-t'],['systemctl','reload','php'+d['php']+'-fpm'])
@@ -94,7 +111,7 @@ class Engine:
             for k,x in self.state.items():
                 if not k.startswith('dns:') or x['domain']!=name: continue
                 val=x['value']
-                if x['type']=='TXT': val='"'+val.replace('\\','\\\\').replace('"','\\"')+'"'
+                if x['type']=='TXT': val=txt(val)
                 if x['type']=='MX': val=str(x['priority'])+' '+val
                 body+=f"{x['host']} {x['ttl']} IN {x['type']} {val}\n"
             path=self.config('/etc/bind/sypanel/db.'+name); old=path.read_text() if path.exists() else None
@@ -127,10 +144,19 @@ class Engine:
         if self.live:
             os.chown(path,0,grp.getgrnam('dovecot').gr_gid)
             run(['postfix','check']); run(['systemctl','reload','postfix']); run(['systemctl','reload','dovecot'])
+    def has_cron(self,d): return any(k.startswith('cron:') and x['domain']==d for k,x in self.state.items())
+    def cron_check(self,d):
+        php=self.state['sites:'+d['domain']].get('php','static')
+        if php=='static': raise ValueError('Cron hanya untuk situs PHP.')
+        if self.live and not Path('/usr/bin/php'+php).exists(): raise ValueError('PHP CLI '+php+' belum terpasang.')
+        self.file({'domain':d['domain'],'op':'read','path':d['script']})
     def cron_apply(self,d):
         user=self.uid(d); jobs=[x for k,x in self.state.items() if k.startswith('cron:') and x['domain']==d]
+        # Same PHP version as the site's runtime; a static site runs no PHP at all.
+        php=self.state.get('sites:'+d,{}).get('php','static')
         content='SHELL=/bin/sh\nPATH=/usr/bin:/bin\nMAILTO=""\n'
-        for x in jobs: content+=f"{x['schedule']} {user} /usr/bin/php {self.sites/d/'public_html'/x['script']} >/dev/null 2>&1\n"
+        if php!='static':
+            for x in jobs: content+=f"{x['schedule']} {user} /usr/bin/php{php} {self.sites/d/'public_html'/x['script']} >/dev/null 2>&1\n"
         atomic(self.config('/etc/cron.d/sypanel-'+user),content,0o644)
     def keys_apply(self,d):
         keys=[x['key'] for k,x in self.state.items() if k.startswith('sshkeys:') and x['domain']==d]
@@ -138,42 +164,68 @@ class Engine:
     def file(self,d):
         root=self.site(d['domain']); action=d['op']; data={k:v for k,v in d.items() if k not in ('domain','op')}
         if self.live:
-            command=['runuser','-u',self.uid(d['domain']),'--','/opt/sypanel/.venv/bin/python','/opt/sypanel/sypanel/fileops.py',str(root)]
+            command=['runuser','-u',self.uid(d['domain']),'--',*HELPER,str(root)]
             try: out=run(command,json.dumps({'action':action,'data':data}))
             except ValueError: raise ValueError('Akses file gagal. Periksa path, izin, ukuran, atau folder yang belum kosong.')
             return json.loads(out)['result']
         from .fileops import operate
         return operate(root,action,data)
+    def as_site(self,name,mode,**streams):
+        """Stream a whole-tree fileops mode (archive/extract) as the site UID."""
+        # The worker waits 240 s for the agent reply; fail cleanly before that.
+        p=subprocess.run(['runuser','-u',self.uid(name),'--',*HELPER,str(self.site(name)),mode],stderr=subprocess.PIPE,timeout=230,env=ENV,**streams)
+        if p.returncode: raise ValueError(p.stderr.decode(errors='replace')[-1800:] or 'Akses file situs gagal.')
     def backup(self,d):
         root=self.site(d['domain']); archive=self.backups/(d['name']+'.tar.gz')
-        # tar never follows symlinks; only regular files and directories are stored.
-        def filt(info): return info if info.isfile() or info.isdir() else None
-        with tarfile.open(archive,'w:gz',dereference=False) as t: t.add(root,arcname='public_html',filter=filt)
-        os.chmod(archive,0o600)
+        fd=os.open(archive,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        try:
+            with os.fdopen(fd,'wb') as out:
+                # Read the tree as the site UID, never as root: only regular files and directories are stored.
+                if self.live: self.as_site(d['domain'],'archive',stdout=out)
+                else:
+                    from .fileops import archive as pack
+                    pack(root,out)
+        except Exception:
+            archive.unlink(missing_ok=True); raise
         return {'filename':archive.name,'bytes':archive.stat().st_size}
     def restore(self,d):
         saved=self.state.get('backups:'+str(d.get('name','')))
         if not saved: raise ValueError('Cadangan tidak ditemukan.')
         root=self.site(saved['domain']); archive=self.backups/saved['filename']
+        from .fileops import members, extract
+        # Check the whole archive before the first write, so a rejected archive leaves the site untouched.
         with tarfile.open(archive,'r:gz') as t:
-            members=t.getmembers()
-            if sum(x.size for x in members)>2*1024**3: raise ValueError('Cadangan melebihi 2 GiB.')
-            for m in members:
-                p=Path(m.name)
-                if p.is_absolute() or '..' in p.parts or not p.parts or p.parts[0]!='public_html' or not (m.isdir() or m.isfile()): raise ValueError('Isi arsip tidak aman.')
-                # Restore via file helper as the isolated site account, never root extraction.
-                relative=str(Path(*p.parts[1:]))
-                if relative=='.': continue
-                if m.isdir():
-                    try: self.file({'domain':saved['domain'],'op':'mkdir','path':relative})
-                    except Exception:
-                        self.file({'domain':saved['domain'],'op':'list','path':relative})
-                else:
-                    if m.size>16*1024**2: raise ValueError('Restore panel dibatasi 16 MiB per file.')
-                    self.file({'domain':saved['domain'],'op':'write','path':relative,'content':base64.b64encode(t.extractfile(m).read()).decode()})
+            if sum(m.size for m,_ in members(t))>2*1024**3: raise ValueError('Cadangan melebihi 2 GiB.')
+        with open(archive,'rb') as source:
+            # Extract as the isolated site account in one process, never as root.
+            if self.live: self.as_site(saved['domain'],'extract',stdin=source)
+            else: extract(root,source)
         return {'message':'File dipulihkan. File tambahan tidak dihapus.'}
+    def drop_site(self,name,php):
+        self.config('/etc/nginx/conf.d/sypanel-'+name+'.conf').unlink(missing_ok=True)
+        if self.live: run(['nginx','-t']); run(['systemctl','reload','nginx'])
+        if php!='static':
+            pool=self.config('/etc/php/'+php+'/fpm/pool.d/'+self.uid(name)+'.conf')
+            if pool.exists():
+                pool.unlink()
+                if self.live: run(['systemctl','reload','php'+php+'-fpm'])
+        self.config('/etc/ssh/sshd_config.d/sypanel-'+self.uid(name)+'.conf').unlink(missing_ok=True)
+        self.config('/etc/ssh/sypanel/'+self.uid(name)).unlink(missing_ok=True)
+        if self.live: run(['sshd','-t']); run(['systemctl','reload','ssh'])
+    def discard(self,kind,data):
+        """Delete of an object this agent never recorded (its create failed): clear leftovers so the panel row can go."""
+        if kind=='sites':
+            d=validate('sites',data); self.drop_site(d['domain'],d['php'])
+        elif kind=='databases':
+            name=str(data.get('name',''))
+            if not re.fullmatch(r'sy_[a-z][a-z0-9_]{2,23}',name): raise ValueError('Database tidak valid.')
+            if self.live: run(['mariadb','--batch'],f"DROP DATABASE IF EXISTS `{name}`; DROP USER IF EXISTS '{name}'@'localhost';")
+        elif kind=='backups':
+            d=validate('backups',data); (self.backups/(d['name']+'.tar.gz')).unlink(missing_ok=True)
+        # Other kinds are generated from agent state, which a failed create already rolled back.
+        return {'message':'Objek tidak tercatat di server. Catatan panel dihapus.'}
     def update(self,kind,data):
-        if kind not in ('sites','databases','dns','mailboxes','forwarders','cron','sshkeys','redirects'): raise ValueError('Objek tidak dapat diubah.')
+        if kind not in KINDS-{'backups'}: raise ValueError('Objek tidak dapat diubah.')
         old_key=kind+':'+str(data.get('_old_name',''))
         old_item=self.state.get(old_key)
         if not old_item: raise ValueError('Objek agent tidak ditemukan.')
@@ -182,6 +234,7 @@ class Engine:
         if kind in ('databases','mailboxes') and d['name']!=old_item['name']: raise ValueError('Nama objek tidak boleh diubah.')
         key=kind+':'+d['name']
         if key!=old_key and key in self.state: raise ValueError('Objek dengan nama tersebut sudah ada.')
+        if kind=='sites' and d['php']=='static' and self.has_cron(d['domain']): raise ValueError('Hapus cron situs ini sebelum beralih ke static.')
         before=dict(self.state)
         d.pop('_old_name',None)
         if kind=='sites': d['ssl']=old_item.get('ssl',False)
@@ -193,6 +246,7 @@ class Engine:
                     self.config('/etc/php/'+old_php+'/fpm/pool.d/'+self.uid(d['domain'])+'.conf').unlink(missing_ok=True)
                     if self.live: run(['systemctl','reload','php'+old_php+'-fpm'])
                 self.state[key].update(self.create_site(d))
+                if self.has_cron(d['domain']): self.cron_apply(d['domain'])
             elif kind=='databases':
                 if self.live:
                     pw=d['password'].replace("'","''"); name=d['name']
@@ -204,7 +258,7 @@ class Engine:
                     self.state[key]['hash']='{SHA512-CRYPT}'+run(['openssl','passwd','-6','-stdin'],d['password']+'\n').strip() if self.live else '{SIMULATED}'
                 self.mail_apply()
             elif kind=='cron':
-                self.file({'domain':d['domain'],'op':'read','path':d['script']}); self.cron_apply(d['domain'])
+                self.cron_check(d); self.cron_apply(d['domain'])
             elif kind=='sshkeys': self.keys_apply(d['domain'])
             elif kind=='redirects': self.web_apply(self.state['sites:'+d['domain']])
             self.save()
@@ -218,6 +272,7 @@ class Engine:
                         self.config('/etc/php/'+d['php']+'/fpm/pool.d/'+self.uid(d['domain'])+'.conf').unlink(missing_ok=True)
                         if self.live: run(['systemctl','reload','php'+d['php']+'-fpm'])
                     self.create_site(old_item)
+                    if self.has_cron(d['domain']): self.cron_apply(d['domain'])
                 elif kind=='dns': self.dns_apply()
                 elif kind in ('mailboxes','forwarders'): self.mail_apply()
                 elif kind=='redirects': self.web_apply(self.state['sites:'+d['domain']])
@@ -229,8 +284,14 @@ class Engine:
         if action=='metrics':
             import psutil
             disk=psutil.disk_usage(str(self.base)); mem=psutil.virtual_memory()
-            states={s:(run(['systemctl','is-active',s]).strip() if self.is_active(s) else 'inactive') for s in ['nginx','mariadb','ssh','cron','bind9','postfix','dovecot']} if self.live else {s:'sandbox' for s in ['nginx','mariadb','ssh','cron','bind9','postfix','dovecot']}
-            return {'hostname':socket.gethostname(),'os':platform.platform(),'cpu':psutil.cpu_percent(interval=.15),'memory':mem.percent,'memory_total':mem.total,'disk':disk.percent,'disk_used':disk.used,'disk_total':disk.total,'load':list(os.getloadavg()),'uptime':int(time.time()-psutil.boot_time()),'services':states,'mode':'live' if self.live else 'sandbox','php':[x for x in ['8.1','8.3'] if not self.live or Path('/usr/sbin/php-fpm'+x).exists()]}
+            units=['nginx','mariadb','ssh','cron','bind9','postfix','dovecot']
+            if self.live:
+                # One call for all units, one output line each; it exits non-zero when any unit is down.
+                out=subprocess.run(['systemctl','is-active',*units],capture_output=True,text=True,env=ENV).stdout.split()
+                states=dict.fromkeys(units,'inactive'); states.update({s:'active' for s,x in zip(units,out) if x=='active'})
+            else: states=dict.fromkeys(units,'sandbox')
+            # interval=None does not block: it measures since the previous call in this long-lived process.
+            return {'hostname':socket.gethostname(),'os':platform.platform(),'cpu':psutil.cpu_percent(interval=None),'memory':mem.percent,'memory_total':mem.total,'disk':disk.percent,'disk_used':disk.used,'disk_total':disk.total,'load':list(os.getloadavg()),'uptime':int(time.time()-psutil.boot_time()),'services':states,'mode':'live' if self.live else 'sandbox','php':[x for x in ['8.1','8.3'] if not self.live or Path('/usr/sbin/php-fpm'+x).exists()]}
         if action=='service':
             service=str(data.get('service')); op=str(data.get('op'))
             if service not in SERVICES or op not in ('restart','reload'): raise ValueError('Operasi layanan ditolak.')
@@ -255,9 +316,10 @@ class Engine:
         if action=='db_export':
             item=self.state.get('databases:'+str(data.get('name','')))
             if not item: raise ValueError('Database tidak ditemukan.')
-            content=run(['mariadb-dump','--single-transaction','--skip-lock-tables',item['name']],timeout=120) if self.live else '-- sandbox: no live database\n'
+            # Bytes, not text: row data need not be valid UTF-8.
+            content=run(['mariadb-dump','--single-transaction','--skip-lock-tables','--hex-blob',item['name']],timeout=120,text=False) if self.live else b'-- sandbox: no live database\n'
             if len(content)>64*1024**2: raise ValueError('Ekspor besar harus melalui SSH administrator.')
-            return {'content':base64.b64encode(content.encode()).decode(),'filename':item['name']+'.sql'}
+            return {'content':base64.b64encode(content).decode(),'filename':item['name']+'.sql'}
         if action=='ssl':
             name=domain(data['domain']); self.site(name)
             email=str(data.get('email',''))
@@ -276,8 +338,9 @@ class Engine:
             if key in self.state: raise ValueError('Objek sudah ada di agent.')
             if kind!='sites': self.site(d['domain'])
         else:
+            if kind not in KINDS: raise ValueError('Objek agent tidak ditemukan.')
             key=kind+':'+str(data.get('name','')); d=self.state.get(key)
-            if not d or kind not in ('sites','databases','dns','mailboxes','forwarders','cron','sshkeys','redirects','backups'): raise ValueError('Objek agent tidak ditemukan.')
+            if not d: return self.discard(kind,data)
             if kind=='sites' and any(k!=key and x.get('domain')==d['domain'] for k,x in self.state.items()): raise ValueError('Hapus objek terkait situs terlebih dahulu.')
         old=dict(self.state); result={}
         if op=='delete': del self.state[key]
@@ -286,15 +349,7 @@ class Engine:
             if kind=='sites':
                 if op=='create': result=self.create_site(d)
                 else:
-                    conf=self.config('/etc/nginx/conf.d/sypanel-'+d['domain']+'.conf'); conf.unlink(missing_ok=True)
-                    if self.live: run(['nginx','-t']); run(['systemctl','reload','nginx'])
-                    php=d.get('php','static')
-                    if php!='static':
-                        self.config('/etc/php/'+php+'/fpm/pool.d/'+self.uid(d['domain'])+'.conf').unlink(missing_ok=True)
-                        if self.live: run(['systemctl','reload','php'+php+'-fpm'])
-                    self.config('/etc/ssh/sshd_config.d/sypanel-'+self.uid(d['domain'])+'.conf').unlink(missing_ok=True)
-                    self.config('/etc/ssh/sypanel/'+self.uid(d['domain'])).unlink(missing_ok=True)
-                    if self.live: run(['sshd','-t']); run(['systemctl','reload','ssh'])
+                    self.drop_site(d['domain'],d.get('php','static'))
                     result={'message':'Situs dinonaktifkan. Direktori dan user OS dipertahankan untuk pemulihan.'}
             elif kind=='databases':
                 name=d['name']
@@ -314,7 +369,7 @@ class Engine:
                     self.state[key]['hash']=hashed
                 self.mail_apply()
             elif kind=='cron':
-                if op=='create': self.file({'domain':d['domain'],'op':'read','path':d['script']})
+                if op=='create': self.cron_check(d)
                 self.cron_apply(d['domain'])
             elif kind=='sshkeys': self.keys_apply(d['domain'])
             elif kind=='redirects': self.web_apply(self.state['sites:'+d['domain']])
@@ -332,16 +387,9 @@ class Engine:
                 try: self.mail_apply()
                 except Exception: pass
             raise
-    def is_active(self,s):
-        return subprocess.run(['systemctl','is-active','--quiet',s],capture_output=True).returncode==0
 
-def main():
-    path=os.environ.get('SYPANEL_SOCKET','/run/sypanel/agent.sock')
-    Path(path).parent.mkdir(exist_ok=True); Path(path).unlink(missing_ok=True)
-    user=pwd.getpwnam('sypanel'); server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-    server.bind(path); os.chown(path,0,user.pw_gid); os.chmod(path,0o660); server.listen(20)
-    while True:
-        connection,_=server.accept()
+def serve(connection, user, slots):
+    try:
         with connection:
             try:
                 _,uid,_=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
@@ -353,11 +401,25 @@ def main():
                     size+=len(chunk)
                     if size>24*1024**2: raise ValueError('Permintaan terlalu besar.')
                     chunks.append(chunk)
-                request=json.loads(b''.join(chunks))
-                result=Engine().dispatch(request['action'],request.get('data',{}))
+                request=json.loads(b''.join(chunks)); action=request['action']
+                if action in READS: result=Engine().dispatch(action,request.get('data',{}))
+                else:
+                    with LOCK: result=Engine().dispatch(action,request.get('data',{}))
                 response={'ok':True,'result':result}
             except Exception as e: response={'ok':False,'error':str(e)}
             try: connection.sendall(json.dumps(response).encode())
             except OSError: pass
+    finally: slots.release()
+
+def main():
+    path=os.environ.get('SYPANEL_SOCKET','/run/sypanel/agent.sock')
+    Path(path).parent.mkdir(exist_ok=True); Path(path).unlink(missing_ok=True)
+    user=pwd.getpwnam('sypanel'); server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+    server.bind(path); os.chown(path,0,user.pw_gid); os.chmod(path,0o660); server.listen(20)
+    # A long job (certbot, restore) no longer blocks metrics, logs or the file manager.
+    slots=threading.BoundedSemaphore(16)
+    while True:
+        connection,_=server.accept(); slots.acquire()
+        threading.Thread(target=serve,args=(connection,user,slots),daemon=True).start()
 
 if __name__=='__main__': main()

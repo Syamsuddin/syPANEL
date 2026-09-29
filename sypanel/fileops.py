@@ -1,18 +1,31 @@
 """Run as site UID. openat/O_NOFOLLOW prevents symlink escape and races."""
-import os, stat, json, sys, base64, tarfile, io
+import os, stat, json, sys, base64, tarfile, io, shutil
 from pathlib import PurePosixPath
 MAX=16*1024*1024
+
+def descend(root, parts):
+    """Directory fd for root/parts, following no symlink on the way."""
+    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        for part in parts:
+            nxt=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd); fd=nxt
+    except BaseException: os.close(fd); raise
+    return fd
+
+def store(fd, name, copy):
+    f=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o640,dir_fd=fd)
+    with os.fdopen(f,'wb') as stream:
+        s=os.fstat(stream.fileno())
+        if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1: raise ValueError('File khusus/link tidak diizinkan.')
+        stream.truncate(0); copy(stream)
 
 def operate(root, action, data):
     path=str(data.get('path','.'))
     parts=PurePosixPath(path).parts
     if path.startswith('/') or '..' in parts or '\x00' in path: raise ValueError('Path tidak valid.')
-    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    fd=descend(root,parts if action=='list' else parts[:-1])
     try:
-        parents=parts if action=='list' else parts[:-1]
-        for part in parents:
-            nxt=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
-            os.close(fd); fd=nxt
         name=parts[-1] if parts else '.'
         if action=='list':
             result=[]
@@ -32,11 +45,7 @@ def operate(root, action, data):
         if action=='write':
             content=base64.b64decode(data.get('content',''),validate=True)
             if len(content)>MAX: raise ValueError('Batas unggah 16 MiB.')
-            f=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o640,dir_fd=fd)
-            with os.fdopen(f,'wb') as stream:
-                s=os.fstat(stream.fileno())
-                if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1: raise ValueError('File khusus/link tidak diizinkan.')
-                stream.truncate(0); stream.write(content)
+            store(fd,name,lambda stream:stream.write(content))
             return {'message':'File disimpan.'}
         if action=='delete':
             if name=='.': raise ValueError('Root tidak boleh dihapus.')
@@ -47,7 +56,37 @@ def operate(root, action, data):
         raise ValueError('Aksi file tidak dikenal.')
     finally: os.close(fd)
 
+def archive(root, out):
+    """Write root as tar.gz. Run as the site UID, a symlink swapped in mid-walk exposes nothing the site cannot already read."""
+    def keep(info): return info if info.isfile() or info.isdir() else None
+    with tarfile.open(fileobj=out,mode='w|gz') as t: t.add(root,arcname='public_html',filter=keep)
+
+def members(t):
+    """Yield (member, path parts below public_html); only plain files and folders inside public_html pass."""
+    for m in t:
+        p=PurePosixPath(m.name)
+        if p.is_absolute() or '..' in p.parts or not p.parts or p.parts[0]!='public_html' or not (m.isdir() or m.isfile()): raise ValueError('Isi arsip tidak aman.')
+        yield m,p.parts[1:]
+
+def extract(root, source):
+    with tarfile.open(fileobj=source,mode='r|gz') as t:
+        for m,parts in members(t):
+            if not parts: continue
+            fd=descend(root,parts[:-1])
+            try:
+                if m.isfile(): store(fd,parts[-1],lambda stream:shutil.copyfileobj(t.extractfile(m),stream))
+                else:
+                    try: os.mkdir(parts[-1],0o750,dir_fd=fd)
+                    except FileExistsError:
+                        if not stat.S_ISDIR(os.stat(parts[-1],dir_fd=fd,follow_symlinks=False).st_mode): raise ValueError('Bukan folder: '+'/'.join(parts))
+            finally: os.close(fd)
+
 if __name__=='__main__':
+    if sys.argv[2:] in (['archive'],['extract']):
+        # Binary tar.gz on stdout (archive) or stdin (extract); errors go to stderr.
+        try: archive(sys.argv[1],sys.stdout.buffer) if sys.argv[2]=='archive' else extract(sys.argv[1],sys.stdin.buffer)
+        except Exception as e: sys.stderr.write(str(e)); sys.exit(1)
+        sys.exit(0)
     try:
         d=json.load(sys.stdin)
         print(json.dumps({'ok':True,'result':operate(sys.argv[1],d['action'],d['data'])}))

@@ -77,7 +77,11 @@ def path_relative(value):
         raise ValueError('Path wajib relatif dan tidak boleh keluar dari direktori situs.')
     return value or '.'
 
-KINDS = {'sites','databases','dns','mailboxes','forwarders','cron','sshkeys','redirects','backups'}
+# Accepted fields per kind besides domain and name. Anything else a client sends is dropped by validate().
+FIELDS = {'sites':('php',),'databases':('password',),'dns':('type','host','value','ttl','priority'),
+  'mailboxes':('local','password'),'forwarders':('local','target'),'cron':('script','schedule'),
+  'sshkeys':('label','key'),'redirects':('target',),'backups':()}
+KINDS = set(FIELDS)
 def validate(kind, raw):
     d = dict(raw)
     if kind not in KINDS: raise ValueError('Modul tidak dikenal.')
@@ -128,6 +132,8 @@ def validate(kind, raw):
                 if term!='*':
                     nums=list(map(int,term.split('-')))
                     if any(n<lo or n>hi for n in nums) or nums[0]>nums[-1]: raise ValueError('Rentang cron tidak valid.')
+        # Rebuild from the checked fields: inner newlines would otherwise split the /etc/cron.d line.
+        d['schedule']=' '.join(fields)
         d['name']=d['domain']+':'+d['script']
     elif kind=='sshkeys':
         d['label']=identifier(d.get('label','key'))
@@ -148,7 +154,7 @@ def validate(kind, raw):
     elif kind=='backups':
         d['name']=str(d.get('name') or d['domain']+'-'+secrets.token_hex(6))
         if not re.fullmatch(re.escape(d['domain'])+r'-[a-f0-9]{12}',d['name']): raise ValueError('Nama cadangan tidak valid.')
-    return d
+    return {k:d[k] for k in ('domain','name')+FIELDS[kind]}
 
 def agent(action, payload=None):
     if MODE=='sandbox':

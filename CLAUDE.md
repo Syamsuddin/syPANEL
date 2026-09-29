@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-syPanel is a self-hosted web hosting control panel for Ubuntu 22.04/24.04 (Flask + SQLite, vanilla JS frontend). Status: Developer Preview. It has only been tested in sandbox mode, never end-to-end on a real VPS. The docs in `docs/` are in Indonesian: `ARCHITECTURE.md` (trust boundaries, storage), `API.md` (endpoint table), `FEATURE_MATRIX.md` (what is and isn't implemented), and `VERIFICATION.md`. The directory is not a git repository.
+syPanel is a self-hosted web hosting control panel for Ubuntu 22.04/24.04 (Flask + SQLite, vanilla JS frontend). Status: Developer Preview. It has only been tested in sandbox mode, never end-to-end on a real VPS. The docs in `docs/` are in Indonesian: `ARCHITECTURE.md` (trust boundaries, storage), `API.md` (endpoint table), `FEATURE_MATRIX.md` (what is and isn't implemented), and `VERIFICATION.md`. Git remote: `github.com/Syamsuddin/syPANEL`, branch `main`.
 
 ## Commands
 
@@ -44,7 +44,14 @@ Jobs left `running` when the worker starts up are marked failed, never replayed.
 
 **Agent apply/rollback pattern.** `Engine.dispatch`/`update` mutates `self.state` first, then applies it. `apply_config()` writes the file atomically, runs the service's config test (`nginx -t`, `php-fpmX -t`, `sshd -t`, `named-checkconf`), then reloads. On failure it restores the previous file and state and re-raises. DNS and mail are regenerated wholesale from state (`dns_apply`, `mail_apply`), not patched incrementally.
 
-**File access.** In live mode, site file operations run `sypanel/fileops.py` as a **standalone script** through `runuser -u <site uid>`, with path `/opt/sypanel/sypanel/fileops.py`. It must stay stdlib-only and must not use package-relative imports. It walks paths with `O_NOFOLLOW` directory fds to block symlink and `..` escapes. Each site's OS user is `sy` + `sha256(domain)[:12]` (`Engine.uid`).
+**File access.** Root never reads or writes inside a site's `public_html`, which the site user controls. In live mode, every file operation runs `sypanel/fileops.py` as a **standalone script** through `runuser -u <site uid>`, with path `/opt/sypanel/sypanel/fileops.py`. That includes the placeholder `index.html`, backups and restores. It must stay stdlib-only and must not use package-relative imports. It has two call styles:
+
+- JSON on stdin for single operations (`list`, `read`, `write`, `mkdir`, `delete`), via `Engine.file`.
+- A tar.gz stream through `argv[2]` = `archive` or `extract`, via `Engine.as_site`.
+
+It walks paths with `O_NOFOLLOW` directory fds to block symlink and `..` escapes. Each site's OS user is `sy` + `sha256(domain)[:12]` (`Engine.uid`).
+
+**Agent concurrency.** The agent handles each connection on its own thread. Actions in `READS` run in parallel. Every other action takes the global `LOCK`, so mutations stay serial. Anything slower than about 240 s fails, because that is how long `core.agent()` waits for a reply.
 
 **Live layout** (created by `deploy/install.sh`):
 
@@ -58,11 +65,14 @@ Jobs left `running` when the worker starts up are marked failed, never replayed.
 - **Import-time side effects.** `sypanel.core` reads `SYPANEL_DATA`/`SYPANEL_MODE` and creates `encryption.key`/`session.key` when first imported. `sypanel.app` builds the app at import time (`app=create_app()`). `tests/test_panel.py` sets both env vars *before* importing `sypanel`. If you add another test file, move that setup into `tests/conftest.py`. Otherwise a file collected earlier (e.g. `test_agent.py`) would bind to `./var`.
 - **Running jobs in tests.** A 202 response only means the job is queued. Call `worker.process_one()` to run it synchronously, then check the job status (see the `create()` helper in the tests).
 - **Adding a resource kind** touches several places:
-  - `KINDS` and a branch in `validate()` in `core.py`
-  - the hardcoded kind tuples in `Engine.update` and the delete branch of `Engine.dispatch`
-  - an apply branch in both create/delete and update, including the rollback block
+  - an entry in `FIELDS` and a branch in `validate()` in `core.py` (`KINDS` is derived from `FIELDS`)
+  - an apply branch in `Engine.dispatch` (create/delete) and `Engine.update`, including the rollback block
+  - `Engine.discard` if a failed create can leave leftovers
   - `meta`/`groups` in `static/app.js`
   - `docs/API.md`
+- **Input whitelist.** `validate()` returns only `domain`, `name` and the kind's `FIELDS`. A new input field is silently dropped until you add it there.
+- **Deleting unrecorded objects.** Deleting an object the agent has no state for (its create failed) goes to `Engine.discard`, which cleans up leftovers idempotently and succeeds, so the panel row can be removed.
+- **Job safety.** A rename's new name is reserved while its job is queued (`claimed()` in `app.py`). Retry is refused when a newer job exists for the same resource. If the panel write fails after the agent has already succeeded, the worker clears the payload so the job can never be replayed.
 - **Secrets.** Fields named `password`, `secret` or `token` are stripped by `core.public()` before they are stored in `resources.data` or agent state. The worker also redacts them from error messages. Keep any new secret field under one of those names. Database passwords go to `mariadb` through stdin, never argv.
 - **Errors.** Raise `ValueError` with a user-facing message. The global error handler turns `ValueError`/`KeyError`/`TypeError` into a 400 with `str(e)`, and `sqlite3.IntegrityError` into a 409. All user-facing strings (errors, UI, CLI output) are in Indonesian; keep them that way.
 - **No schema migrations.** `core.init()` only runs `CREATE TABLE IF NOT EXISTS`, so new columns will not reach existing databases.

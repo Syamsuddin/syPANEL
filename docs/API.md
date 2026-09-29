@@ -13,7 +13,7 @@ Semua endpoint berawalan `/api`. Body JSON, kecuali respons unduhan. Autentikasi
 | PATCH | /resources/ID | Ubah objek, admin/operator, HTTP 202 |
 | DELETE | /resources/ID | Hapus, body confirm harus nama objek |
 | GET | /jobs | Status pekerjaan, tanpa payload rahasia |
-| POST | /jobs/ID/retry | Retry gagal, admin |
+| POST | /jobs/ID/retry | Retry pekerjaan gagal yang masih terbaru untuk objeknya, admin |
 | POST | /ssl | domain, email, admin/operator |
 | POST | /service | service, op restart/reload, admin |
 | GET | /logs?service=nginx | Journal, admin/operator |

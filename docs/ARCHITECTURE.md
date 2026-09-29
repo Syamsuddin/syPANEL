@@ -4,9 +4,9 @@
 
 Browser mengakses Nginx HTTPS pada 2083. Nginx meneruskan permintaan ke Gunicorn pada loopback 8090. Flask memverifikasi sesi, CSRF, dan role. Perubahan dicatat sebagai resource pending dan job terenkripsi dalam SQLite. Worker mengambil satu pekerjaan melalui transaksi `BEGIN IMMEDIATE`, lalu mengirim operasi ke agent melalui Unix socket.
 
-Agent berjalan sebagai root. Ia menerima koneksi hanya dari UID `sypanel` berdasarkan Linux `SO_PEERCRED`, memvalidasi ulang data, dan menjalankan operasi yang tercantum dalam allowlist. Tidak ada endpoint perintah root bebas. Agent memegang state sendiri, hanya dapat ditulis root. Worker menandai resource aktif setelah agent berhasil.
+Agent berjalan sebagai root. Ia menerima koneksi hanya dari UID `sypanel` berdasarkan Linux `SO_PEERCRED`, memvalidasi ulang data, dan menjalankan operasi yang tercantum dalam allowlist. Tidak ada endpoint perintah root bebas. Permintaan baca (metrik, log, file manager, unduhan) dilayani paralel, sedangkan operasi yang mengubah server dijalankan berurutan. Agent memegang state sendiri, hanya dapat ditulis root. Worker menandai resource aktif setelah agent berhasil.
 
-Akses file dilakukan agent melalui proses `runuser` dengan UID situs. Helper menggunakan descriptor relatif, `O_NOFOLLOW`, pemeriksaan tipe file dan penolakan hardlink saat menulis. Proses PHP setiap situs juga memakai user OS yang berbeda. SFTP memakai chroot milik root dengan subdirektori public_html milik user situs.
+Akses file, termasuk pembuatan dan pemulihan backup serta file awal situs, dilakukan agent melalui proses `runuser` dengan UID situs. Root tidak membaca atau menulis di dalam public_html. Helper menggunakan descriptor relatif, `O_NOFOLLOW`, pemeriksaan tipe file dan penolakan hardlink saat menulis. Proses PHP setiap situs juga memakai user OS yang berbeda. SFTP memakai chroot milik root dengan subdirektori public_html milik user situs.
 
 ## Batas kepercayaan
 
@@ -37,7 +37,7 @@ Pembuatan user OS, database, file dan sertifikat dapat meninggalkan efek parsial
 
 ## HTTP
 
-Sesi cookie HttpOnly, SameSite Strict dan Secure pada mode live. CSRF wajib pada mutasi termasuk login. CSP melarang skrip inline, objek, framing, dan koneksi eksternal. File statis, CSS, dan JavaScript tersedia lokal. Nginx mengganti header proxy, dan Flask mempercayai tepat satu proxy pada mode live. Gunicorn harus tetap hanya listen di loopback. Rate limit menggunakan IP terusan dan username, lima kegagalan per lima menit.
+Sesi cookie HttpOnly, SameSite Strict dan Secure pada mode live. CSRF wajib pada mutasi termasuk login. CSP melarang skrip inline, objek, framing, dan koneksi eksternal. File statis, CSS, dan JavaScript tersedia lokal. Nginx mengganti header proxy, dan Flask mempercayai tepat satu proxy pada mode live. Gunicorn harus tetap hanya listen di loopback. Rate limit dihitung per IP terusan (IPv6 per prefiks /64), lima kegagalan per lima menit. Username sengaja tidak dikunci agar pihak luar tidak dapat mengunci akun admin; lindungi akun dengan password kuat dan TOTP.
 
 ## Referensi implementasi
 

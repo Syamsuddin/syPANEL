@@ -6,7 +6,7 @@ Tanggal pengemasan: 29 September 2026.
 
 | Pemeriksaan | Hasil |
 | --- | --- |
-| Unit/integration test Python pada sandbox | 24 lulus |
+| Unit/integration test Python pada sandbox | 39 lulus |
 | Validasi sintaks JavaScript dengan `node --check` | Lulus |
 | Validasi sintaks installer Bash dengan `bash -n` | Lulus |
 | Kompilasi modul Python | Lulus |
@@ -22,6 +22,8 @@ Tanggal pengemasan: 29 September 2026.
 Login, logout, CSRF, rate limit, pembatasan role viewer, CRUD file, penolakan traversal dan symlink, backup dan restore file, ekspor, penghapusan payload rahasia setelah pekerjaan selesai, DNS, email sandbox, forwarder, redirect, SSH key, cron, konfirmasi penghapusan, dependensi situs, input berbahaya, allowlist agent, TOTP dan replay, pencabutan sesi, status pekerjaan gagal, serta perubahan konfigurasi/password.
 
 Perbaikan selama verifikasi mencakup konsistensi nama backup antara API dan agent, penutupan koneksi SQLite, hak akses direktori website dan venv, serta permission map Postfix. Tes diulang setelah perubahan aplikasi.
+
+Perbaikan hasil code review 29 September 2026: file awal situs, backup, dan restore tidak lagi dijalankan root di public_html; field masukan yang tidak dikenal dibuang; objek yang gagal dibuat dapat dihapus; rename yang masih antre mengunci namanya; restore memeriksa seluruh arsip sebelum menulis dan tidak lagi dibatasi 16 MiB per file; rate limit login tidak mengunci username; redirect juga berlaku untuk URL `.php`; retry pekerjaan lama ditolak; jadwal cron dinormalisasi; TXT panjang dipecah per 255 byte; ekspor database aman untuk data biner; cron memakai versi PHP situs; agent melayani permintaan baca secara paralel. Setiap perbaikan memiliki tes regresi yang gagal pada kode sebelum perbaikan. Uji browser dan uji VPS tidak diulang untuk perubahan ini.
 
 ## Belum diuji di lingkungan target
 
