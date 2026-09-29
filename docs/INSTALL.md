@@ -34,7 +34,7 @@ Installer tidak mengubah firewall atau security group milik penyedia VPS. Pastik
 | 22/TCP | SSH administrator dan SFTP situs |
 | 80/TCP | Website HTTP dan tantangan ACME |
 | 443/TCP | Website HTTPS |
-| 2083/TCP | Panel HTTPS, sebaiknya batasi ke IP administrator atau VPN |
+| 2409/TCP | Panel HTTPS, sebaiknya batasi ke IP administrator atau VPN |
 | 53/UDP dan TCP | DNS otoritatif jika menggunakan BIND syPanel |
 | 25/TCP | SMTP antarpeladen, khusus integrasi email |
 | 587/TCP | Pengiriman email klien, STARTTLS |
@@ -42,7 +42,7 @@ Installer tidak mengubah firewall atau security group milik penyedia VPS. Pastik
 
 Port 8090 hanya terikat pada loopback. MariaDB tidak perlu dibuka ke internet. Pertahankan akses SSH saat mengubah firewall.
 
-Masuk ke `https://IP-SERVER:2083`. Sertifikat awal dibuat sendiri dengan masa 30 hari. Ganti menggunakan domain dan sertifikat sah sebelum digunakan tim.
+Masuk ke `https://IP-SERVER:2409`. Sertifikat awal dibuat sendiri dengan masa 30 hari. Ganti menggunakan domain dan sertifikat sah sebelum digunakan tim.
 
 ## 4. Sertifikat domain panel
 
@@ -52,7 +52,9 @@ Arahkan DNS A domain panel ke IP VPS. Jika menambahkan AAAA, alamat IPv6 harus b
 sudo bash /opt/sypanel/deploy/enable-panel-ssl.sh panel.contoh.id admin@contoh.id
 ```
 
-Skrip ini menyetujui ketentuan ACME Let's Encrypt dan meminta sertifikat menggunakan email tersebut. Akses panel menjadi `https://panel.contoh.id:2083`. Domain panel harus khusus panel, jangan dibuat lagi sebagai website dari menu Website & domain. Renewal hook memuat ulang Nginx.
+Skrip ini menyetujui ketentuan ACME Let's Encrypt dan meminta sertifikat menggunakan email tersebut. Akses panel menjadi `https://panel.contoh.id:2409`. Domain panel harus khusus panel, jangan dibuat lagi sebagai website dari menu Website & domain. Renewal hook memuat ulang Nginx.
+
+Port panel bawaan adalah 2409. Untuk memindahkannya, ubah baris `listen` di `/etc/nginx/conf.d/sypanel-control.conf` dan tujuan redirect di `/etc/nginx/conf.d/sypanel-acme.conf` (jika ada), jalankan `sudo nginx -t && sudo systemctl reload nginx`, lalu sesuaikan firewall. `enable-panel-ssl.sh` mempertahankan port yang sedang dipakai, sehingga menjalankannya ulang tidak memindahkan panel.
 
 ## 5. Periksa layanan
 

@@ -2,7 +2,7 @@
 
 ## Komponen dan alur
 
-Browser mengakses Nginx HTTPS pada 2083. Nginx meneruskan permintaan ke Gunicorn pada loopback 8090. Flask memverifikasi sesi, CSRF, dan role. Perubahan dicatat sebagai resource pending dan job terenkripsi dalam SQLite. Worker mengambil satu pekerjaan melalui transaksi `BEGIN IMMEDIATE`, lalu mengirim operasi ke agent melalui Unix socket.
+Browser mengakses Nginx HTTPS pada 2409. Nginx meneruskan permintaan ke Gunicorn pada loopback 8090. Flask memverifikasi sesi, CSRF, dan role. Perubahan dicatat sebagai resource pending dan job terenkripsi dalam SQLite. Worker mengambil satu pekerjaan melalui transaksi `BEGIN IMMEDIATE`, lalu mengirim operasi ke agent melalui Unix socket.
 
 Agent berjalan sebagai root. Ia menerima koneksi hanya dari UID `sypanel` berdasarkan Linux `SO_PEERCRED`, memvalidasi ulang data, dan menjalankan operasi yang tercantum dalam allowlist. Tidak ada endpoint perintah root bebas. Permintaan baca (metrik, log, file manager, unduhan) dilayani paralel, sedangkan operasi yang mengubah server dijalankan berurutan. Agent memegang state sendiri, hanya dapat ditulis root. Worker menandai resource aktif setelah agent berhasil.
 

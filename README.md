@@ -36,7 +36,7 @@ cd syPanel
 sudo bash deploy/install.sh
 ```
 
-Installer meminta konfirmasi `INSTALL`, kemudian password admin. Tidak ada password admin bawaan. Setelah selesai, buka `https://IP-SERVER:2083`.
+Installer meminta konfirmasi `INSTALL`, kemudian password admin. Tidak ada password admin bawaan. Setelah selesai, buka `https://IP-SERVER:2409`.
 
 ## Menjalankan sandbox lokal
 

@@ -11,6 +11,9 @@ if domain(sys.argv[1])!=sys.argv[1]: raise SystemExit('Gunakan domain huruf keci
 if not re.fullmatch(r'[a-zA-Z0-9._+-]+@[a-zA-Z0-9.-]+',sys.argv[2]): raise SystemExit('Email tidak valid.')
 PY
 install -d -m 0755 /var/lib/sypanel-acme
+# Keep the port the panel already listens on (install.sh sets it), so re-running never moves the panel.
+panel_port="$(sed -n 's/^ *listen \([0-9][0-9]*\) ssl;.*/\1/p' /etc/nginx/conf.d/sypanel-control.conf | head -n1)"
+panel_port="${panel_port:-2409}"
 cp -a /etc/nginx/conf.d/sypanel-control.conf /etc/sypanel/control.before-ssl.conf
 cat > /etc/nginx/conf.d/sypanel-acme.conf <<NGINX
 server {
@@ -18,7 +21,7 @@ server {
  server_name $panel_domain;
  root /var/lib/sypanel-acme;
  location ^~ /.well-known/acme-challenge/ { allow all; }
- location / { return 301 https://$panel_domain:2083; }
+ location / { return 301 https://$panel_domain:$panel_port; }
 }
 NGINX
 nginx -t
@@ -26,7 +29,7 @@ systemctl reload nginx
 certbot certonly --webroot -w /var/lib/sypanel-acme -d "$panel_domain" --non-interactive --agree-tos --email "$panel_email"
 cat > /etc/nginx/conf.d/sypanel-control.conf <<NGINX
 server {
- listen 2083 ssl;
+ listen $panel_port ssl;
  server_name $panel_domain;
  ssl_certificate /etc/letsencrypt/live/$panel_domain/fullchain.pem;
  ssl_certificate_key /etc/letsencrypt/live/$panel_domain/privkey.pem;
@@ -44,4 +47,4 @@ server {
 NGINX
 nginx -t
 systemctl reload nginx
-printf 'Panel: https://%s:2083\n' "$panel_domain"
+printf 'Panel: https://%s:%s\n' "$panel_domain" "$panel_port"

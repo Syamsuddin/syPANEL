@@ -55,7 +55,7 @@ It walks paths with `O_NOFOLLOW` directory fds to block symlink and `..` escapes
 
 **Live layout** (created by `deploy/install.sh`):
 
-- Services: `sypanel-agent` (root), `sypanel-web` (gunicorn on 127.0.0.1:8090 behind Nginx TLS on port 2083), `sypanel-worker`.
+- Services: `sypanel-agent` (root), `sypanel-web` (gunicorn on 127.0.0.1:8090 behind Nginx TLS on port 2409), `sypanel-worker`.
 - Paths: code in `/opt/sypanel` (root-owned), panel data in `/var/lib/sypanel`, agent state in `/var/lib/sypanel-agent`, sites in `/srv/sypanel/sites/<domain>/public_html`.
 - `sypanel-admin` wraps `manage.py` for live use.
 - The installer refuses to run over an existing `/opt/sypanel`. There is no upgrade or migration path.

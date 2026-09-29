@@ -60,7 +60,7 @@ openssl req -x509 -nodes -newkey rsa:3072 -days 30 -keyout /etc/sypanel/panel.ke
 chmod 0600 /etc/sypanel/panel.key
 cat > /etc/nginx/conf.d/sypanel-control.conf <<'NGINX'
 server {
- listen 2083 ssl;
+ listen 2409 ssl;
  server_name _;
  ssl_certificate /etc/sypanel/panel.crt;
  ssl_certificate_key /etc/sypanel/panel.key;
@@ -161,4 +161,4 @@ systemctl daemon-reload
 systemctl enable --now nginx mariadb named ssh cron certbot.timer sypanel-agent sypanel-web sypanel-worker
 systemctl reload nginx
 systemctl restart named
-printf '\nsyPanel terpasang. Buka https://IP-SERVER:2083\nSertifikat awal bersifat sementara. Pasang sertifikat domain dengan deploy/enable-panel-ssl.sh.\nAturan firewall tidak diubah. Lihat docs/INSTALL.md untuk port yang diperlukan.\n'
+printf '\nsyPanel terpasang. Buka https://IP-SERVER:2409\nSertifikat awal bersifat sementara. Pasang sertifikat domain dengan deploy/enable-panel-ssl.sh.\nAturan firewall tidak diubah. Lihat docs/INSTALL.md untuk port yang diperlukan.\n'
